@@ -1,4 +1,4 @@
-# v0.2.24
+# v0.2.25
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from genlayer import *
 from dataclasses import dataclass
@@ -336,6 +336,127 @@ OR
         self.policies[policy_id] = policy
 
     @gl.public.write
+    def adjudicate_sla_dispute(self, policy_id: str, counter_telemetry_url: str, counter_telemetry_hash: str) -> None:
+        """
+        Supreme Appellate Review: Resolves DISPUTED policies definitively.
+        Validators re-audit the benchmark manifest, subscriber telemetry, and provider counter-evidence.
+        Transitions state to either BREACH_INDEMNIFIED (Subscriber compensated) or ACTIVE (Provider exonerated).
+        """
+        if policy_id not in self.policies:
+            raise UserError("Policy not found")
+        policy = self.policies[policy_id]
+
+        if policy.status != "DISPUTED":
+            raise UserError("Policy is not in DISPUTED status")
+
+        caller = str(gl.message.sender_address).lower()
+        if caller != policy.provider_address and caller != policy.subscriber_address:
+            raise UserError("Only policy participants can trigger appellate adjudication")
+
+        clean_counter_url = counter_telemetry_url.strip()
+        if not clean_counter_url.startswith("http://") and not clean_counter_url.startswith("https://") and not clean_counter_url.startswith("ipfs://"):
+            raise UserError("Valid counter telemetry URL required")
+
+        clean_counter_hash = counter_telemetry_hash.strip().lower()
+        if len(clean_counter_hash) != 64 or not all(c in "0123456789abcdef" for c in clean_counter_hash):
+            raise UserError("Evidence commitment failed: counter_telemetry_hash must be a 64-char hex SHA-256 digest")
+
+        manifest_url = policy.benchmark_manifest_url
+        manifest_hash = policy.benchmark_manifest_hash
+        orig_telem_url = policy.incident_telemetry_url
+        orig_telem_hash = policy.incident_telemetry_hash
+        p99_limit = str(policy.max_p99_latency_ms)
+        err_limit = str(policy.max_error_rate_permille)
+        drift_limit = str(policy.max_head_drift_blocks)
+        dispute_context = policy.adjudication_rationale
+
+        def appeal_leader_fn():
+            # Verify counter-telemetry digest
+            try:
+                c_res = gl.nondet.web.render(clean_counter_url, mode="text")
+                c_text = str(c_res)
+                computed_c_hash = hashlib.sha256(c_text.encode("utf-8")).hexdigest().lower()
+                if computed_c_hash != clean_counter_hash:
+                    return {
+                        "is_sla_breached": True,
+                        "reason": f"APPELLATE FAILURE: Counter-evidence hash mismatch! Expected {clean_counter_hash}, got {computed_c_hash}"
+                    }
+            except Exception as e:
+                return {"is_sla_breached": True, "reason": f"Failed to acquire counter-evidence: {str(e)}"}
+
+            # Retrieve original evidence
+            try:
+                m_res = gl.nondet.web.render(manifest_url, mode="text")
+                m_text = str(m_res)
+                t_res = gl.nondet.web.render(orig_telem_url, mode="text")
+                t_text = str(t_res)
+            except Exception as e:
+                return {"is_sla_breached": True, "reason": f"Failed to acquire original audit logs: {str(e)}"}
+
+            prompt = f"""You are the Appellate Chief Justice of the GenLayer Infrastructure & SLA Court.
+Re-audit the contested SLA incident using the provider's counter-evidence against original claims.
+
+THRESHOLDS: Max P99 Latency = {p99_limit}ms, Max Error Rate = {err_limit}/1000, Max Drift = {drift_limit} blocks
+
+BENCHMARK SPECIFICATION:
+{m_text}
+
+SUBSCRIBER INCIDENT LOGS:
+{t_text}
+
+DISPUTE CONTEXT & OBJECTION:
+{dispute_context}
+
+PROVIDER COUNTER-TELEMETRY & PROOFS:
+{c_text}
+
+DECISION MANDATE:
+1. Return is_sla_breached: false IF the provider proves metrics were within acceptable limits or the incident was client-side/unrelated.
+2. Return is_sla_breached: true IF the SLA breach is upheld despite counter-evidence.
+
+Return STRICT JSON only:
+{{"is_sla_breached": true|false, "reason": "Thorough appellate adjudication rationale"}}"""
+
+            try:
+                res = gl.nondet.exec_prompt(prompt, response_format="json")
+                return self._parse_llm_json(res)
+            except Exception as e:
+                return {"is_sla_breached": True, "reason": f"Appellate LLM error: {str(e)}"}
+
+        def appeal_validator_fn(leader_res) -> bool:
+            if not isinstance(leader_res, gl.vm.Return):
+                return False
+            l_data = self._parse_llm_json(leader_res.calldata if hasattr(leader_res, "calldata") else leader_res)
+            if not isinstance(l_data, dict) or type(l_data.get("is_sla_breached")) is not bool:
+                return False
+            mine_data = appeal_leader_fn()
+            if not isinstance(mine_data, dict) or type(mine_data.get("is_sla_breached")) is not bool:
+                return False
+            return l_data["is_sla_breached"] == mine_data["is_sla_breached"]
+
+        res = gl.vm.run_nondet(appeal_leader_fn, appeal_validator_fn)
+        final_verdict = self._parse_llm_json(res)
+
+        is_breached = final_verdict.get("is_sla_breached", True)
+        rationale = str(final_verdict.get("reason", "Appellate review finalized.")).strip()
+
+        policy.adjudication_rationale = f"[APPELLATE DECREE] {rationale} | Prior: {dispute_context}"
+
+        if is_breached:
+            # Breach upheld: Indemnify subscriber immediately
+            bond_val = policy.underwriting_bond
+            policy.underwriting_bond = bigint(0)
+            policy.status = "BREACH_INDEMNIFIED"
+            self.underwritten_pool_balance -= bond_val
+            self._allocate_credit(policy.subscriber_address, bond_val)
+        else:
+            # Provider exonerated: Policy returns to active state
+            policy.status = "ACTIVE"
+            policy.adjudication_verdict = "PERFORMANCE_ACCEPTABLE"
+
+        self.policies[policy_id] = policy
+
+    @gl.public.write
     def execute_indemnity_payout(self, policy_id: str) -> None:
         """Finalizes compensation to the subscriber strictly after cooling-off period elapses."""
         if policy_id not in self.policies:
@@ -421,7 +542,8 @@ OR
             "verdict": p.adjudication_verdict,
             "rationale": p.adjudication_rationale,
             "created_at": str(p.created_at_timestamp),
-            "challenge_ends_at": str(p.challenge_period_ends_at)
+            "challenge_ends_at": str(p.challenge_period_ends_at),
+            "last_disputed_at": str(p.last_disputed_timestamp)
         })
 
     @gl.public.view
