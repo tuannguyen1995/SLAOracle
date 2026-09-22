@@ -1,0 +1,8 @@
+{
+  "network": "studionet",
+  "chainId": 61999,
+  "rpcUrl": "https://studio.genlayer.com/api",
+  "contractAddress": "0x94dEF221E511f9E51bF27Aecd19FD3b2A945BA70",
+  "status": "FINALIZED_ON_STUDIONET",
+  "verifiedStatus": "LIVE_AND_VERIFIED_ON_STUDIONET"
+}
