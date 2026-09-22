@@ -48,11 +48,10 @@ class Contract(gl.Contract):
     governor_address: str
 
     def __init__(self):
+        # GenVM automatically initializes TreeMap and DynArray storage fields.
+        # DO NOT reassign self.policies = TreeMap() or DynArray() to avoid TypeError/AssertionError.
         self.governor_address = str(gl.message.sender_address).lower()
         self.underwritten_pool_balance = bigint(0)
-        self.policies = TreeMap()
-        self.policy_catalog = DynArray()
-        self.claimable_vault = TreeMap()
 
     def _allocate_credit(self, recipient: str, value: bigint) -> None:
         rec_clean = str(recipient).lower()
