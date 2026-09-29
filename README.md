@@ -12,7 +12,7 @@
 
 The SLAOracle Intelligent Contract is deployed and verified on GenLayer studionet:
 
-- **Contract Address:** `0x94dEF221E511f9E51bF27Aecd19FD3b2A945BA70`
+- **Contract Address:** `0xF2995aEf0B7AFd222B34dA753920FbcC45623334`
 - **Deployment Network:** `studionet`
 - **Execution Environment:** GenVM / Optimistic Democracy Semantic Consensus
 - **Contract Source:** [`contracts/sla_oracle.py`](contracts/sla_oracle.py)
