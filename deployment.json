@@ -2,7 +2,7 @@
   "network": "studionet",
   "chainId": 61999,
   "rpcUrl": "https://studio.genlayer.com/api",
-  "contractAddress": "0xF2995aEf0B7AFd222B34dA753920FbcC45623334",
+  "contractAddress": "0x5A975cD481235E31cE2DA6063fBfd59dEd5A1bF8",
   "status": "FINALIZED_ON_STUDIONET",
   "verifiedStatus": "LIVE_AND_VERIFIED_ON_STUDIONET"
 }
