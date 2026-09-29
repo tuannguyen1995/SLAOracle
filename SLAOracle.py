@@ -1,20 +1,36 @@
-# v0.2.16
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from genlayer import *
 from dataclasses import dataclass
 import json
-import datetime
-import hashlib
-
-@gl.evm.contract_interface
-class _Recipient:
-    class View:
-        pass
-    class Write:
-        pass
 
 class UserError(Exception):
     pass
+
+def _addr_str(addr) -> str:
+    try:
+        if hasattr(addr, "as_hex"):
+            return str(addr.as_hex).lower()
+    except Exception:
+        pass
+    return str(addr).lower()
+
+def _get_sender():
+    try:
+        sender = getattr(gl.message, "sender", None)
+        if sender is not None:
+            return sender
+    except Exception:
+        pass
+    try:
+        sender = getattr(gl.message, "sender_address", None)
+        if sender is not None:
+            return sender
+    except Exception:
+        pass
+    try:
+        return gl.message.sender
+    except Exception:
+        return gl.message.sender_address
 
 @allow_storage
 @dataclass
@@ -50,7 +66,7 @@ class Contract(gl.Contract):
     def __init__(self):
         # GenVM automatically initializes TreeMap and DynArray storage fields.
         # DO NOT reassign self.policies = TreeMap() or DynArray() to avoid TypeError/AssertionError.
-        self.governor_address = str(gl.message.sender_address).lower()
+        self.governor_address = _addr_str(_get_sender())
         self.underwritten_pool_balance = bigint(0)
 
     def _allocate_credit(self, recipient: str, value: bigint) -> None:
@@ -60,6 +76,7 @@ class Contract(gl.Contract):
 
     def _get_execution_time(self) -> bigint:
         """Derive trusted deterministic execution timestamp strictly from runtime context."""
+        import datetime
         if not hasattr(gl, "message_raw") or not isinstance(gl.message_raw, dict):
             raise UserError("Execution environment missing transaction message context")
         raw_datetime = gl.message_raw.get("datetime", None)
@@ -194,7 +211,7 @@ class Contract(gl.Contract):
         if len(clean_manifest_hash) != 64 or not all(c in "0123456789abcdef" for c in clean_manifest_hash):
             raise UserError("Evidence commitment failed: benchmark_manifest_hash must be a 64-char hex SHA-256 digest")
 
-        caller = str(gl.message.sender_address).lower()
+        caller = _addr_str(_get_sender())
         now = self._get_execution_time()
         coverage_seconds = bigint(coverage_duration_days if coverage_duration_days > 0 else 30) * bigint(86400)
 
@@ -232,6 +249,7 @@ class Contract(gl.Contract):
         incident_telemetry_hash: str
     ) -> None:
         """Subscriber submits performance logs when degradation or downtime occurs."""
+        import hashlib
         if policy_id not in self.policies:
             raise UserError("Policy identifier not found")
         policy = self.policies[policy_id]
@@ -239,7 +257,7 @@ class Contract(gl.Contract):
         if policy.status != "ACTIVE":
             raise UserError(f"Policy not eligible for incident claim (Current status: {policy.status})")
 
-        caller = str(gl.message.sender_address).lower()
+        caller = _addr_str(_get_sender())
         if caller != policy.subscriber_address:
             raise UserError("Only the registered subscriber can file an SLA claim")
 
@@ -400,7 +418,7 @@ OR
         if policy.status != "ASSESSING":
             raise UserError("Policy is not in a contestable assessment stage")
 
-        caller = str(gl.message.sender_address).lower()
+        caller = _addr_str(_get_sender())
         if caller != policy.provider_address:
             raise UserError("Only the underwriter provider can contest this assessment")
 
@@ -422,6 +440,7 @@ OR
         Does NOT feed unbound free-form rationale from prior stages into the adjudication prompt.
         Validators independently bind both verdict boolean and discrete breach_code.
         """
+        import hashlib
         if policy_id not in self.policies:
             raise UserError("Policy not found")
         policy = self.policies[policy_id]
@@ -429,7 +448,7 @@ OR
         if policy.status != "DISPUTED":
             raise UserError("Policy is not in DISPUTED status")
 
-        caller = str(gl.message.sender_address).lower()
+        caller = _addr_str(_get_sender())
         if caller != policy.provider_address and caller != policy.subscriber_address:
             raise UserError("Only policy participants can trigger appellate adjudication")
 
@@ -574,7 +593,7 @@ OR
         if policy.status != "ASSESSING":
             raise UserError("Policy is not awaiting payout settlement")
 
-        caller = str(gl.message.sender_address).lower()
+        caller = _addr_str(_get_sender())
         if caller != policy.subscriber_address and caller != policy.provider_address:
             raise UserError("Unauthorized settlement executor")
 
@@ -601,7 +620,7 @@ OR
         if policy.status != "ACTIVE":
             raise UserError(f"Cannot reclaim bond while policy is in status '{policy.status}'")
 
-        caller = str(gl.message.sender_address).lower()
+        caller = _addr_str(_get_sender())
         if caller != policy.provider_address:
             raise UserError("Only the underwriting provider can release matured funds")
 
@@ -620,13 +639,13 @@ OR
     @gl.public.write
     def claim_vault_credits(self) -> None:
         """Non-custodial Pull settlement: Beneficiaries withdraw settled GEN safely."""
-        caller = str(gl.message.sender_address).lower()
+        caller = _addr_str(_get_sender())
         balance = self.claimable_vault.get(caller, bigint(0))
         if balance <= bigint(0):
             raise UserError("No claimable credits available in vault")
 
         self.claimable_vault[caller] = bigint(0)
-        _Recipient(Address(caller)).emit_transfer(value=u256(int(balance)))
+        gl.get_contract_at(Address(caller)).emit_transfer(value=u256(int(balance)))
 
     @gl.public.view
     def get_policy_summary(self, policy_id: str) -> str:
