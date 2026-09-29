@@ -73,23 +73,25 @@ Below is an illustrative worked example based on the contract execution flow, ve
   - `incident_telemetry_hash`: `"b10a8db164e0754105b7a99be72e3fe5ec432ce7d51c7c5c242e4d01a0372332"`
 
 **Expected Verdict & Consensus State Transition [Expected Output]:**
-- **Consensus Verdict:** `INDEMNITY_TRIGGERED`
+- **Consensus Verdict:** `INDEMNITY_TRIGGERED:LATENCY_BREACH`
 - **Status:** `ASSESSING` (Entering 24-hour challenge cooling-off window)
-- **Adjudication Rationale:** `"Telemetry conclusively demonstrates P99 latency reached 620ms (threshold: 300ms) with HTTP 504 gateway timeout rate of 42/1000 between 14:00 and 15:30 UTC."`
+- **Adjudication Rationale:** `"[LATENCY_BREACH] Telemetry conclusively demonstrates P99 latency reached 620ms (guaranteed threshold: 300ms) with error rates within bounds."`
 - **Challenge Period Ends At:** `now + 86400`
 
 ---
 
 ## 2. Technical Architecture & Intelligent Contract Principles
 
-1. **Decentralized Metric Adjudication & Semantic Consensus**:
-   - Rather than naive string matching or format-only validation, the custom validator verifies the **substantive meaning** of the adjudication verdict.
-   - Consensus validators independently acquire benchmark manifests, verify SHA-256 digests, probe endpoint health, and run LLM evaluations.
-   - Validators agree strictly on the semantic outcome (`is_sla_breached: true/false`), ensuring that two nodes reaching different substantive conclusions will never achieve consensus.
+1. **Decentralized Multi-Value Binding & Semantic Consensus**:
+   - Rather than checking only a single boolean or surface format, consensus validators independently bind **every value influencing adjudication and payouts**:
+     - `is_sla_breached`: Strict boolean decision.
+     - `breach_code`: Discrete bounded classification (`NONE`, `LATENCY_BREACH`, `ERROR_RATE_BREACH`, `HEAD_DRIFT_BREACH`, `MULTI_METRIC_BREACH`, `INSUFFICIENT_DATA`).
+   - Two validator nodes reaching different substantive metric determinations (e.g. latency vs drift) **will never reach consensus**.
 
-2. **Supreme Appellate Arbitration (Dead-Lock Elimination)**:
+2. **Supreme Appellate Arbitration (Pure Bound Evidence & Dead-Lock Elimination)**:
    - Eliminates dead-lock states when a provider disputes an incident through `adjudicate_sla_dispute`.
-   - Multi-agent consensus re-audits the original benchmark manifest, subscriber telemetry, and provider counter-evidence, definitively resolving claims to `BREACH_INDEMNIFIED` or `ACTIVE`.
+   - **Critical Safety Guardrail:** The appellate prompt strictly consumes bound cryptographic evidence (manifest, subscriber telemetry, provider counter-proofs) and **never feeds unverified free-form rationale from prior stages into the payout path**.
+   - Appellate validators independently bind both the verdict boolean and `breach_code`, definitively transitioning policies to `BREACH_INDEMNIFIED` or `ACTIVE`.
 
 3. **Zero-Normalization Strict Parsing**:
    - Parses directly via `json.loads` without regex normalizers or markdown stripping.
@@ -113,7 +115,7 @@ Below is an illustrative worked example based on the contract execution flow, ve
 - `underwrite_sla_policy(policy_id, subscriber_address, rpc_endpoint_url, benchmark_manifest_url, benchmark_manifest_hash, max_p99_latency_ms, max_error_rate_permille, max_head_drift_blocks, coverage_duration_days)`: Infrastructure provider deposits bond and registers SLA thresholds.
 - `submit_telemetry_assessment(policy_id, incident_telemetry_url, incident_telemetry_hash)`: Subscriber submits incident logs triggering GenLayer multi-agent consensus adjudication.
 - `dispute_assessment_verdict(policy_id, challenge_rationale)`: 24-hour contestation window for providers before payouts finalize.
-- `adjudicate_sla_dispute(policy_id, counter_telemetry_url, counter_telemetry_hash)`: Appellate consensus adjudication resolving disputed policies with counter-evidence.
+- `adjudicate_sla_dispute(policy_id, counter_telemetry_url, counter_telemetry_hash)`: Appellate consensus adjudication resolving disputed policies with counter-evidence without unbound rationale injection.
 - `execute_indemnity_payout(policy_id)`: Credits the subscriber via the pull-vault if cooling-off period elapses without dispute.
 - `release_matured_underwriting(policy_id)`: Provider reclaims underwriting bond once policy term matures without breach.
 - `claim_vault_credits()`: Non-custodial pull withdrawal of settled GEN to recipient address.
@@ -145,9 +147,9 @@ Problem Solved:
 Web3 dApps and node operators pay thousands monthly for cloud/RPC services with 99.9% uptime SLAs. However, compensation claims are processed through biased, centralized, and slow manual negotiations.
 
 Technical Architecture:
-1. Decentralized Metric Adjudication: Providers lock native GEN underwriting bonds. When outages occur, clients submit verifiable incident telemetry. Consensus validators query live endpoints and evaluate incident logs against committed SLA terms without centralized oracles.
-2. Supreme Appellate Review: Resolves DISPUTED states through consensus re-audits with provider counter-evidence, preventing indefinite fund locks.
-3. Cryptographic Digest Commitments: Enforces strict SHA-256 hash anchoring for both the SLA benchmark manifest and incident logs, failing closed on mutable URL drift or tampering.
+1. Decentralized Multi-Value Adjudication: Validators independently bind every value influencing payouts (both is_sla_breached boolean and discrete breach_code: LATENCY, ERROR_RATE, HEAD_DRIFT, MULTI_METRIC).
+2. Pure Bound Appellate Review: Resolves DISPUTED states by auditing only cryptographic proofs (SHA-256 anchored benchmark, incident logs, counter-telemetry). Completely removes unverified free-form rationale from the payout path.
+3. Cryptographic Commitments: Enforces strict SHA-256 anchoring, failing closed on URL drift or tampering.
 4. Zero-Normalization Parser: Implements direct json.loads decoding, rejecting markdown fences and pseudo-JSON.
 5. Pull-over-Push Safe Settlement: Indemnity claims settle via claimable_vault, eliminating transfer reverts.
 ```

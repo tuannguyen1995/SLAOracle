@@ -32,7 +32,7 @@ class SLAPerformancePolicy:
     max_p99_latency_ms: bigint
     max_error_rate_permille: bigint  # 1/1000 (e.g. 50/1000 = 5%)
     max_head_drift_blocks: bigint
-    adjudication_verdict: str        # "INDEMNITY_TRIGGERED", "PERFORMANCE_ACCEPTABLE", "UNRESOLVED"
+    adjudication_verdict: str        # "INDEMNITY_TRIGGERED", "PERFORMANCE_ACCEPTABLE", "NONE"
     adjudication_rationale: str
     metric_confidence: bigint
     created_at_timestamp: bigint
@@ -80,6 +80,7 @@ class Contract(gl.Contract):
         """
         ZERO-NORMALIZATION STRICT JSON PARSER:
         Direct json.loads only. Rejects code fences, markdown, or pseudo-JSON immediately.
+        Enforces both boolean breach status and discrete breach_code.
         """
         if isinstance(raw_input, dict):
             parsed_dict = raw_input
@@ -89,25 +90,76 @@ class Contract(gl.Contract):
             except Exception as e:
                 return {
                     "is_sla_breached": False,
+                    "breach_code": "INSUFFICIENT_DATA",
                     "reason": f"FAIL-CLOSED: Response failed strict JSON decoding: {str(e)}"
                 }
 
         if not isinstance(parsed_dict, dict):
-            return {"is_sla_breached": False, "reason": "FAIL-CLOSED: Output root is not an object."}
+            return {
+                "is_sla_breached": False,
+                "breach_code": "INSUFFICIENT_DATA",
+                "reason": "FAIL-CLOSED: Output root is not an object."
+            }
 
-        if "is_sla_breached" not in parsed_dict or "reason" not in parsed_dict:
-            return {"is_sla_breached": False, "reason": "FAIL-CLOSED: Missing required fields."}
+        if "is_sla_breached" not in parsed_dict or "breach_code" not in parsed_dict or "reason" not in parsed_dict:
+            return {
+                "is_sla_breached": False,
+                "breach_code": "INSUFFICIENT_DATA",
+                "reason": "FAIL-CLOSED: Missing required fields."
+            }
 
         is_breached = parsed_dict["is_sla_breached"]
+        breach_code = parsed_dict["breach_code"]
         rationale = parsed_dict["reason"]
 
         if type(is_breached) is not bool:
-            return {"is_sla_breached": False, "reason": "FAIL-CLOSED: 'is_sla_breached' must be a strict boolean."}
+            return {
+                "is_sla_breached": False,
+                "breach_code": "INSUFFICIENT_DATA",
+                "reason": "FAIL-CLOSED: 'is_sla_breached' must be a strict boolean."
+            }
+
+        valid_codes = {
+            "NONE",
+            "LATENCY_BREACH",
+            "ERROR_RATE_BREACH",
+            "HEAD_DRIFT_BREACH",
+            "MULTI_METRIC_BREACH",
+            "INSUFFICIENT_DATA"
+        }
+        if not isinstance(breach_code, str) or breach_code.strip() not in valid_codes:
+            return {
+                "is_sla_breached": False,
+                "breach_code": "INSUFFICIENT_DATA",
+                "reason": "FAIL-CLOSED: Invalid or unrecognized breach_code."
+            }
+
+        clean_code = breach_code.strip()
+        if is_breached and clean_code in ("NONE", "INSUFFICIENT_DATA"):
+            return {
+                "is_sla_breached": False,
+                "breach_code": "INSUFFICIENT_DATA",
+                "reason": "FAIL-CLOSED: is_sla_breached cannot be true with non-breach code."
+            }
+        if not is_breached and clean_code not in ("NONE", "INSUFFICIENT_DATA"):
+            return {
+                "is_sla_breached": False,
+                "breach_code": "INSUFFICIENT_DATA",
+                "reason": "FAIL-CLOSED: is_sla_breached cannot be false with active breach code."
+            }
 
         if not isinstance(rationale, str) or len(rationale.strip()) == 0:
-            return {"is_sla_breached": False, "reason": "FAIL-CLOSED: 'reason' must be non-empty text."}
+            return {
+                "is_sla_breached": False,
+                "breach_code": "INSUFFICIENT_DATA",
+                "reason": "FAIL-CLOSED: 'reason' must be non-empty text."
+            }
 
-        return {"is_sla_breached": is_breached, "reason": rationale.strip()}
+        return {
+            "is_sla_breached": is_breached,
+            "breach_code": clean_code,
+            "reason": rationale.strip()
+        }
 
     @gl.public.write.payable
     def underwrite_sla_policy(
@@ -218,10 +270,15 @@ class Contract(gl.Contract):
                 if computed_man_hash != manifest_hash:
                     return {
                         "is_sla_breached": False,
+                        "breach_code": "INSUFFICIENT_DATA",
                         "reason": f"EVIDENCE INTEGRITY MISMATCH: Manifest hash mismatch! Expected {manifest_hash}, computed {computed_man_hash}"
                     }
             except Exception as e:
-                return {"is_sla_breached": False, "reason": f"Failed to acquire benchmark terms: {str(e)}"}
+                return {
+                    "is_sla_breached": False,
+                    "breach_code": "INSUFFICIENT_DATA",
+                    "reason": f"Failed to acquire benchmark terms: {str(e)}"
+                }
 
             # 2. Acquire & Verify Telemetry Incident Digest
             try:
@@ -231,10 +288,15 @@ class Contract(gl.Contract):
                 if computed_telem_hash != clean_telem_hash:
                     return {
                         "is_sla_breached": False,
+                        "breach_code": "INSUFFICIENT_DATA",
                         "reason": f"EVIDENCE INTEGRITY MISMATCH: Telemetry hash mismatch! Expected {clean_telem_hash}, computed {computed_telem_hash}"
                     }
             except Exception as e:
-                return {"is_sla_breached": False, "reason": f"Failed to acquire telemetry logs: {str(e)}"}
+                return {
+                    "is_sla_breached": False,
+                    "breach_code": "INSUFFICIENT_DATA",
+                    "reason": f"Failed to acquire telemetry logs: {str(e)}"
+                }
 
             # 3. Live Endpoint Status Probe
             live_probe_status = "HEALTHY"
@@ -266,18 +328,30 @@ UNTRUNCATED INCIDENT TELEMETRY:
 
 RULES FOR DECISION:
 1. Return is_sla_breached: true ONLY if the telemetry conclusively proves latency exceeded {p99_limit} ms, error rate exceeded {err_limit}/1000, or head drift exceeded {drift_limit} blocks.
-2. If metrics were within bounds, or the logs are fabricated/inconclusive, return is_sla_breached: false.
+2. Choose exact breach_code:
+   - "NONE": No thresholds breached.
+   - "LATENCY_BREACH": P99 latency exceeded {p99_limit} ms.
+   - "ERROR_RATE_BREACH": Error rate exceeded {err_limit}/1000.
+   - "HEAD_DRIFT_BREACH": Head drift exceeded {drift_limit} blocks.
+   - "MULTI_METRIC_BREACH": More than one metric exceeded.
+   - "INSUFFICIENT_DATA": Telemetry is corrupt, inconclusive, or missing.
+3. If is_sla_breached is true, breach_code must be LATENCY_BREACH, ERROR_RATE_BREACH, HEAD_DRIFT_BREACH, or MULTI_METRIC_BREACH.
+4. If is_sla_breached is false, breach_code must be NONE or INSUFFICIENT_DATA.
 
 Return STRICT JSON only:
-{{"is_sla_breached": true, "reason": "Detailed metric breach justification"}}
+{{"is_sla_breached": true, "breach_code": "LATENCY_BREACH", "reason": "P99 latency measured at 620ms exceeding guaranteed 300ms limit"}}
 OR
-{{"is_sla_breached": false, "reason": "Detailed justification confirming acceptable performance"}}"""
+{{"is_sla_breached": false, "breach_code": "NONE", "reason": "All audited metrics remained within guaranteed bounds"}}"""
 
             try:
                 exec_res = gl.nondet.exec_prompt(prompt, response_format="json")
                 return self._parse_llm_json(exec_res)
             except Exception as e:
-                return {"is_sla_breached": False, "reason": f"LLM execution fault: {str(e)}"}
+                return {
+                    "is_sla_breached": False,
+                    "breach_code": "INSUFFICIENT_DATA",
+                    "reason": f"LLM execution fault: {str(e)}"
+                }
 
         def validator_fn(leader_res) -> bool:
             if not isinstance(leader_res, gl.vm.Return):
@@ -290,23 +364,28 @@ OR
             if not isinstance(mine_data, dict) or type(mine_data.get("is_sla_breached")) is not bool:
                 return False
 
-            return l_data["is_sla_breached"] == mine_data["is_sla_breached"]
+            # Independently bind every value influencing adjudication: both boolean and discrete breach_code
+            return (
+                l_data["is_sla_breached"] == mine_data["is_sla_breached"]
+                and l_data["breach_code"] == mine_data["breach_code"]
+            )
 
         consensus_output = gl.vm.run_nondet(leader_fn, validator_fn)
         final_assessment = self._parse_llm_json(consensus_output)
 
         is_breached = final_assessment.get("is_sla_breached", False)
+        breach_code = final_assessment.get("breach_code", "NONE")
         rationale = str(final_assessment.get("reason", "Consensus concluded.")).strip()
 
         now = self._get_execution_time()
-        policy.adjudication_rationale = rationale
+        policy.adjudication_rationale = f"[{breach_code}] {rationale}"
 
         if is_breached:
-            policy.adjudication_verdict = "INDEMNITY_TRIGGERED"
+            policy.adjudication_verdict = f"INDEMNITY_TRIGGERED:{breach_code}"
             policy.challenge_period_ends_at = now + bigint(86400) # 24h cooling-off challenge period
             policy.status = "ASSESSING"
         else:
-            policy.adjudication_verdict = "PERFORMANCE_ACCEPTABLE"
+            policy.adjudication_verdict = f"PERFORMANCE_ACCEPTABLE:{breach_code}"
             policy.status = "ACTIVE"
 
         self.policies[policy_id] = policy
@@ -338,8 +417,10 @@ OR
     def adjudicate_sla_dispute(self, policy_id: str, counter_telemetry_url: str, counter_telemetry_hash: str) -> None:
         """
         Supreme Appellate Review: Resolves DISPUTED policies definitively.
-        Validators re-audit the benchmark manifest, subscriber telemetry, and provider counter-evidence.
-        Transitions state to either BREACH_INDEMNIFIED (Subscriber compensated) or ACTIVE (Provider exonerated).
+        Validators re-audit strictly bound cryptographic evidence:
+        benchmark manifest, subscriber telemetry, and provider counter-evidence.
+        Does NOT feed unbound free-form rationale from prior stages into the adjudication prompt.
+        Validators independently bind both verdict boolean and discrete breach_code.
         """
         if policy_id not in self.policies:
             raise UserError("Policy not found")
@@ -367,7 +448,6 @@ OR
         p99_limit = str(policy.max_p99_latency_ms)
         err_limit = str(policy.max_error_rate_permille)
         drift_limit = str(policy.max_head_drift_blocks)
-        dispute_context = policy.adjudication_rationale
 
         def appeal_leader_fn():
             # Verify counter-telemetry digest
@@ -378,10 +458,15 @@ OR
                 if computed_c_hash != clean_counter_hash:
                     return {
                         "is_sla_breached": True,
+                        "breach_code": "MULTI_METRIC_BREACH",
                         "reason": f"APPELLATE FAILURE: Counter-evidence hash mismatch! Expected {clean_counter_hash}, got {computed_c_hash}"
                     }
             except Exception as e:
-                return {"is_sla_breached": True, "reason": f"Failed to acquire counter-evidence: {str(e)}"}
+                return {
+                    "is_sla_breached": True,
+                    "breach_code": "MULTI_METRIC_BREACH",
+                    "reason": f"Failed to acquire counter-evidence: {str(e)}"
+                }
 
             # Retrieve original evidence
             try:
@@ -390,10 +475,15 @@ OR
                 t_res = gl.nondet.web.render(orig_telem_url, mode="text")
                 t_text = str(t_res)
             except Exception as e:
-                return {"is_sla_breached": True, "reason": f"Failed to acquire original audit logs: {str(e)}"}
+                return {
+                    "is_sla_breached": True,
+                    "breach_code": "MULTI_METRIC_BREACH",
+                    "reason": f"Failed to acquire original audit logs: {str(e)}"
+                }
 
+            # Strictly bound objective prompt: unverified free-form rationale is omitted
             prompt = f"""You are the Appellate Chief Justice of the GenLayer Infrastructure & SLA Court.
-Re-audit the contested SLA incident using the provider's counter-evidence against original claims.
+Re-audit the contested SLA incident using the provider's counter-evidence against subscriber claims.
 
 THRESHOLDS: Max P99 Latency = {p99_limit}ms, Max Error Rate = {err_limit}/1000, Max Drift = {drift_limit} blocks
 
@@ -403,24 +493,36 @@ BENCHMARK SPECIFICATION:
 SUBSCRIBER INCIDENT LOGS:
 {t_text}
 
-DISPUTE CONTEXT & OBJECTION:
-{dispute_context}
-
 PROVIDER COUNTER-TELEMETRY & PROOFS:
 {c_text}
 
 DECISION MANDATE:
-1. Return is_sla_breached: false IF the provider proves metrics were within acceptable limits or the incident was client-side/unrelated.
+1. Return is_sla_breached: false IF the provider conclusively proves metrics were within acceptable limits or the incident was client-side/unrelated.
 2. Return is_sla_breached: true IF the SLA breach is upheld despite counter-evidence.
+3. Choose exact breach_code:
+   - "NONE": Provider proofs verified; service compliant.
+   - "LATENCY_BREACH": P99 latency breach upheld.
+   - "ERROR_RATE_BREACH": Error rate breach upheld.
+   - "HEAD_DRIFT_BREACH": Head drift breach upheld.
+   - "MULTI_METRIC_BREACH": Multi-metric breach upheld.
+   - "INSUFFICIENT_DATA": Counter-evidence was invalid or inconclusive.
+4. If is_sla_breached is true, breach_code must be LATENCY_BREACH, ERROR_RATE_BREACH, HEAD_DRIFT_BREACH, or MULTI_METRIC_BREACH.
+5. If is_sla_breached is false, breach_code must be NONE.
 
 Return STRICT JSON only:
-{{"is_sla_breached": true|false, "reason": "Thorough appellate adjudication rationale"}}"""
+{{"is_sla_breached": true, "breach_code": "LATENCY_BREACH", "reason": "Counter-evidence failed to disprove P99 latency degradation"}}
+OR
+{{"is_sla_breached": false, "breach_code": "NONE", "reason": "Provider counter-evidence conclusively demonstrated client-side networking fault"}}"""
 
             try:
                 res = gl.nondet.exec_prompt(prompt, response_format="json")
                 return self._parse_llm_json(res)
             except Exception as e:
-                return {"is_sla_breached": True, "reason": f"Appellate LLM error: {str(e)}"}
+                return {
+                    "is_sla_breached": True,
+                    "breach_code": "MULTI_METRIC_BREACH",
+                    "reason": f"Appellate LLM error: {str(e)}"
+                }
 
         def appeal_validator_fn(leader_res) -> bool:
             if not isinstance(leader_res, gl.vm.Return):
@@ -431,27 +533,34 @@ Return STRICT JSON only:
             mine_data = appeal_leader_fn()
             if not isinstance(mine_data, dict) or type(mine_data.get("is_sla_breached")) is not bool:
                 return False
-            return l_data["is_sla_breached"] == mine_data["is_sla_breached"]
+
+            # Independently bind every value influencing payout: both boolean and discrete breach_code
+            return (
+                l_data["is_sla_breached"] == mine_data["is_sla_breached"]
+                and l_data["breach_code"] == mine_data["breach_code"]
+            )
 
         res = gl.vm.run_nondet(appeal_leader_fn, appeal_validator_fn)
         final_verdict = self._parse_llm_json(res)
 
         is_breached = final_verdict.get("is_sla_breached", True)
+        breach_code = final_verdict.get("breach_code", "MULTI_METRIC_BREACH")
         rationale = str(final_verdict.get("reason", "Appellate review finalized.")).strip()
 
-        policy.adjudication_rationale = f"[APPELLATE DECREE] {rationale} | Prior: {dispute_context}"
+        policy.adjudication_rationale = f"[APPELLATE DECREE:{breach_code}] {rationale}"
 
         if is_breached:
             # Breach upheld: Indemnify subscriber immediately
             bond_val = policy.underwriting_bond
             policy.underwriting_bond = bigint(0)
             policy.status = "BREACH_INDEMNIFIED"
+            policy.adjudication_verdict = f"INDEMNITY_TRIGGERED:{breach_code}"
             self.underwritten_pool_balance -= bond_val
             self._allocate_credit(policy.subscriber_address, bond_val)
         else:
             # Provider exonerated: Policy returns to active state
             policy.status = "ACTIVE"
-            policy.adjudication_verdict = "PERFORMANCE_ACCEPTABLE"
+            policy.adjudication_verdict = f"PERFORMANCE_ACCEPTABLE:{breach_code}"
 
         self.policies[policy_id] = policy
 

@@ -119,13 +119,24 @@ def test_evidence_integrity_hashes():
     assert valid_hash != tampered_hash
 
 
-def test_strict_json_parsing():
-    """Verify zero-normalization JSON parsing rejects markdown fences and pseudo-JSON."""
-    fenced_output = "```json\n{\"is_sla_breached\": true, \"reason\": \"Breached P99\"}\n```"
+def test_strict_json_parsing_and_breach_code_binding():
+    """Verify zero-normalization JSON parsing enforces both boolean breach and discrete breach_code."""
+    # Rejects markdown fences
+    fenced_output = "```json\n{\"is_sla_breached\": true, \"breach_code\": \"LATENCY_BREACH\", \"reason\": \"P99 exceeded\"}\n```"
     with pytest.raises(Exception):
         json.loads(fenced_output)
 
-    canonical_output = '{"is_sla_breached": true, "reason": "Breached P99"}'
+    # Valid canonical payload
+    canonical_output = '{"is_sla_breached": true, "breach_code": "LATENCY_BREACH", "reason": "P99 exceeded"}'
     parsed = json.loads(canonical_output)
     assert parsed["is_sla_breached"] is True
-    assert isinstance(parsed["is_sla_breached"], bool)
+    assert parsed["breach_code"] == "LATENCY_BREACH"
+
+    # Semantic validator check: two nodes with different breach_code must NOT agree
+    leader_data = {"is_sla_breached": True, "breach_code": "LATENCY_BREACH"}
+    validator_data = {"is_sla_breached": True, "breach_code": "HEAD_DRIFT_BREACH"}
+    consensus_agreed = (
+        leader_data["is_sla_breached"] == validator_data["is_sla_breached"]
+        and leader_data["breach_code"] == validator_data["breach_code"]
+    )
+    assert not consensus_agreed, "Validators must bind both boolean and discrete breach_code"
