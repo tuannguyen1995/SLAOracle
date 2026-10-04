@@ -88,10 +88,17 @@ Below is an illustrative worked example based on the contract execution flow, ve
      - `breach_code`: Discrete bounded classification (`NONE`, `LATENCY_BREACH`, `ERROR_RATE_BREACH`, `HEAD_DRIFT_BREACH`, `MULTI_METRIC_BREACH`, `INSUFFICIENT_DATA`).
    - Two validator nodes reaching different substantive metric determinations (e.g. latency vs drift) **will never reach consensus**.
 
-2. **Supreme Appellate Arbitration (Pure Bound Evidence & Dead-Lock Elimination)**:
-   - Eliminates dead-lock states when a provider disputes an incident through `adjudicate_sla_dispute`.
-   - **Critical Safety Guardrail:** The appellate prompt strictly consumes bound cryptographic evidence (manifest, subscriber telemetry, provider counter-proofs) and **never feeds unverified free-form rationale from prior stages into the payout path**.
-   - Appellate validators independently bind both the verdict boolean and `breach_code`, definitively transitioning policies to `BREACH_INDEMNIFIED` or `ACTIVE`.
+2. **Supreme Appellate Arbitration (Pre-Committed Evidence & Triple-Hash Re-Verification)**:
+   - Eliminates dead-lock states when a provider disputes an incident through `adjudicate_sla_dispute(policy_id)`.
+   - **Provider Pre-Commitment:** Counter-evidence (`counter_telemetry_url` and `counter_telemetry_hash`) must be authorized and pre-committed by the underwriter provider inside `dispute_assessment_verdict(...)`.
+   - **No Forced Indemnification:** A subscriber cannot trigger or force indemnity payout by injecting arbitrary, corrupt, or invalid counter-evidence URLs.
+   - **Triple-Hash Re-Verification:** During appeal, consensus nodes independently re-fetch and re-verify the SHA-256 digests of all 3 cryptographic artifacts:
+     1. Benchmark agreement manifest against `benchmark_manifest_hash`.
+     2. Subscriber incident telemetry against `incident_telemetry_hash`.
+     3. Provider counter-telemetry against `counter_telemetry_hash`.
+   - **Safe Fail-Closed Invariant:** Missing, unretrievable, or mismatched evidence **never settles the bond as a proven breach**. In all failure/mismatch scenarios, the verdict strictly defaults to `is_sla_breached: false` (`INSUFFICIENT_DATA`), preserving underwritten funds safely in the pool.
+   - **Pure Evidence Evaluation:** The appellate prompt strictly consumes bound cryptographic evidence and never feeds unverified free-form rationale from prior stages into the payout path.
+   - Appellate validators independently bind both the verdict boolean and discrete `breach_code`, definitively transitioning policies to `BREACH_INDEMNIFIED` or returning them to `ACTIVE`.
 
 3. **Zero-Normalization Strict Parsing**:
    - Parses directly via `json.loads` without regex normalizers or markdown stripping.
@@ -114,12 +121,12 @@ Below is an illustrative worked example based on the contract execution flow, ve
 
 - `underwrite_sla_policy(policy_id, subscriber_address, rpc_endpoint_url, benchmark_manifest_url, benchmark_manifest_hash, max_p99_latency_ms, max_error_rate_permille, max_head_drift_blocks, coverage_duration_days)`: Infrastructure provider deposits bond and registers SLA thresholds.
 - `submit_telemetry_assessment(policy_id, incident_telemetry_url, incident_telemetry_hash)`: Subscriber submits incident logs triggering GenLayer multi-agent consensus adjudication.
-- `dispute_assessment_verdict(policy_id, challenge_rationale)`: 24-hour contestation window for providers before payouts finalize.
-- `adjudicate_sla_dispute(policy_id, counter_telemetry_url, counter_telemetry_hash)`: Appellate consensus adjudication resolving disputed policies with counter-evidence without unbound rationale injection.
+- `dispute_assessment_verdict(policy_id, challenge_rationale, counter_telemetry_url, counter_telemetry_hash)`: 24-hour contestation window where underwriter provider pre-commits verified counter-evidence URL and SHA-256 digest.
+- `adjudicate_sla_dispute(policy_id)`: Appellate consensus adjudication re-verifying triple-hash evidence without arbitrary external injection.
 - `execute_indemnity_payout(policy_id)`: Credits the subscriber via the pull-vault if cooling-off period elapses without dispute.
 - `release_matured_underwriting(policy_id)`: Provider reclaims underwriting bond once policy term matures without breach.
 - `claim_vault_credits()`: Non-custodial pull withdrawal of settled GEN to recipient address.
-- `get_policy_summary(policy_id)`: Returns full JSON summary of an underwriting policy.
+- `get_policy_summary(policy_id)`: Returns full JSON summary of an underwriting policy including counter-evidence.
 - `get_all_policy_ids()`: Returns JSON list of all registered policy identifiers.
 - `get_claimable_balance(account_address)`: Returns claimable vault balance for an address.
 
@@ -148,8 +155,9 @@ Web3 dApps and node operators pay thousands monthly for cloud/RPC services with 
 
 Technical Architecture:
 1. Decentralized Multi-Value Adjudication: Validators independently bind every value influencing payouts (both is_sla_breached boolean and discrete breach_code: LATENCY, ERROR_RATE, HEAD_DRIFT, MULTI_METRIC).
-2. Pure Bound Appellate Review: Resolves DISPUTED states by auditing only cryptographic proofs (SHA-256 anchored benchmark, incident logs, counter-telemetry). Completely removes unverified free-form rationale from the payout path.
-3. Cryptographic Commitments: Enforces strict SHA-256 anchoring, failing closed on URL drift or tampering.
-4. Zero-Normalization Parser: Implements direct json.loads decoding, rejecting markdown fences and pseudo-JSON.
-5. Pull-over-Push Safe Settlement: Indemnity claims settle via claimable_vault, eliminating transfer reverts.
+2. Pre-Committed & Re-Verified Appellate Review: Provider pre-commits counter-evidence during dispute. Appellate consensus re-verifies stored SHA-256 digests across all three artifacts (manifest, incident logs, counter-proofs).
+3. Anti-Forced Indemnification Safeguards: Subscribers cannot force indemnification with invalid counter-evidence. Missing or mismatched evidence strictly fails closed to no-breach (INSUFFICIENT_DATA) and never settles the bond as a breach.
+4. Pure Bound Appellate Prompt: Completely removes unverified free-form rationale from the payout path.
+5. Zero-Normalization Parser: Implements direct json.loads decoding, rejecting markdown fences and pseudo-JSON.
+6. Pull-over-Push Safe Settlement: Indemnity claims settle via claimable_vault, eliminating transfer reverts.
 ```

@@ -45,6 +45,8 @@ class SLAPerformancePolicy:
     benchmark_manifest_hash: str # SHA-256 digest of benchmark agreement manifest
     incident_telemetry_url: str
     incident_telemetry_hash: str # SHA-256 digest of incident telemetry payload
+    counter_telemetry_url: str   # Provider pre-committed counter-evidence URL
+    counter_telemetry_hash: str  # SHA-256 digest of provider counter-evidence
     max_p99_latency_ms: bigint
     max_error_rate_permille: bigint  # 1/1000 (e.g. 50/1000 = 5%)
     max_head_drift_blocks: bigint
@@ -229,6 +231,8 @@ class Contract(gl.Contract):
             benchmark_manifest_hash=clean_manifest_hash,
             incident_telemetry_url="",
             incident_telemetry_hash="",
+            counter_telemetry_url="",
+            counter_telemetry_hash="",
             max_p99_latency_ms=bigint(max_p99_latency_ms),
             max_error_rate_permille=bigint(max_error_rate_permille),
             max_head_drift_blocks=bigint(max_head_drift_blocks),
@@ -409,8 +413,14 @@ OR
         self.policies[policy_id] = policy
 
     @gl.public.write
-    def dispute_assessment_verdict(self, policy_id: str, challenge_rationale: str) -> None:
-        """Provider challenges an indemnification verdict within the 24-hour cooling-off window."""
+    def dispute_assessment_verdict(
+        self,
+        policy_id: str,
+        challenge_rationale: str,
+        counter_telemetry_url: str,
+        counter_telemetry_hash: str
+    ) -> None:
+        """Provider challenges an indemnification verdict within the 24-hour cooling-off window with pre-committed counter-evidence."""
         if policy_id not in self.policies:
             raise UserError("Policy not found")
         policy = self.policies[policy_id]
@@ -426,18 +436,29 @@ OR
         if now >= policy.challenge_period_ends_at:
             raise UserError("The 24-hour contestation window has expired")
 
+        clean_counter_url = counter_telemetry_url.strip()
+        if not clean_counter_url.startswith("http://") and not clean_counter_url.startswith("https://") and not clean_counter_url.startswith("ipfs://"):
+            raise UserError("Valid counter telemetry URL required")
+
+        clean_counter_hash = counter_telemetry_hash.strip().lower()
+        if len(clean_counter_hash) != 64 or not all(c in "0123456789abcdef" for c in clean_counter_hash):
+            raise UserError("Evidence commitment failed: counter_telemetry_hash must be a 64-char hex SHA-256 digest")
+
         policy.status = "DISPUTED"
         policy.last_disputed_timestamp = now
+        policy.counter_telemetry_url = clean_counter_url
+        policy.counter_telemetry_hash = clean_counter_hash
         policy.adjudication_rationale = f"[CONTESTED BY PROVIDER] {challenge_rationale.strip()} | Prior: {policy.adjudication_rationale}"
         self.policies[policy_id] = policy
 
     @gl.public.write
-    def adjudicate_sla_dispute(self, policy_id: str, counter_telemetry_url: str, counter_telemetry_hash: str) -> None:
+    def adjudicate_sla_dispute(self, policy_id: str) -> None:
         """
         Supreme Appellate Review: Resolves DISPUTED policies definitively.
         Validators re-audit strictly bound cryptographic evidence:
-        benchmark manifest, subscriber telemetry, and provider counter-evidence.
-        Does NOT feed unbound free-form rationale from prior stages into the adjudication prompt.
+        benchmark manifest, subscriber telemetry, and provider pre-committed counter-evidence.
+        Re-verifies stored hashes for the original manifest and incident telemetry during appeal.
+        Missing or mismatched evidence never settles the bond as a proven breach.
         Validators independently bind both verdict boolean and discrete breach_code.
         """
         import hashlib
@@ -452,52 +473,69 @@ OR
         if caller != policy.provider_address and caller != policy.subscriber_address:
             raise UserError("Only policy participants can trigger appellate adjudication")
 
-        clean_counter_url = counter_telemetry_url.strip()
-        if not clean_counter_url.startswith("http://") and not clean_counter_url.startswith("https://") and not clean_counter_url.startswith("ipfs://"):
-            raise UserError("Valid counter telemetry URL required")
-
-        clean_counter_hash = counter_telemetry_hash.strip().lower()
-        if len(clean_counter_hash) != 64 or not all(c in "0123456789abcdef" for c in clean_counter_hash):
-            raise UserError("Evidence commitment failed: counter_telemetry_hash must be a 64-char hex SHA-256 digest")
-
         manifest_url = policy.benchmark_manifest_url
         manifest_hash = policy.benchmark_manifest_hash
         orig_telem_url = policy.incident_telemetry_url
         orig_telem_hash = policy.incident_telemetry_hash
+        counter_url = policy.counter_telemetry_url
+        counter_hash = policy.counter_telemetry_hash
         p99_limit = str(policy.max_p99_latency_ms)
         err_limit = str(policy.max_error_rate_permille)
         drift_limit = str(policy.max_head_drift_blocks)
 
         def appeal_leader_fn():
-            # Verify counter-telemetry digest
-            try:
-                c_res = gl.nondet.web.render(clean_counter_url, mode="text")
-                c_text = str(c_res)
-                computed_c_hash = hashlib.sha256(c_text.encode("utf-8")).hexdigest().lower()
-                if computed_c_hash != clean_counter_hash:
-                    return {
-                        "is_sla_breached": True,
-                        "breach_code": "MULTI_METRIC_BREACH",
-                        "reason": f"APPELLATE FAILURE: Counter-evidence hash mismatch! Expected {clean_counter_hash}, got {computed_c_hash}"
-                    }
-            except Exception as e:
-                return {
-                    "is_sla_breached": True,
-                    "breach_code": "MULTI_METRIC_BREACH",
-                    "reason": f"Failed to acquire counter-evidence: {str(e)}"
-                }
-
-            # Retrieve original evidence
+            # 1. Acquire & Re-verify Benchmark Manifest Digest
             try:
                 m_res = gl.nondet.web.render(manifest_url, mode="text")
                 m_text = str(m_res)
-                t_res = gl.nondet.web.render(orig_telem_url, mode="text")
-                t_text = str(t_res)
+                computed_m_hash = hashlib.sha256(m_text.encode("utf-8")).hexdigest().lower()
+                if computed_m_hash != manifest_hash:
+                    return {
+                        "is_sla_breached": False,
+                        "breach_code": "INSUFFICIENT_DATA",
+                        "reason": f"APPELLATE DISMISSED: Manifest hash mismatch! Expected {manifest_hash}, computed {computed_m_hash}"
+                    }
             except Exception as e:
                 return {
-                    "is_sla_breached": True,
-                    "breach_code": "MULTI_METRIC_BREACH",
-                    "reason": f"Failed to acquire original audit logs: {str(e)}"
+                    "is_sla_breached": False,
+                    "breach_code": "INSUFFICIENT_DATA",
+                    "reason": f"APPELLATE DISMISSED: Failed to acquire benchmark terms: {str(e)}"
+                }
+
+            # 2. Acquire & Re-verify Subscriber Incident Telemetry Digest
+            try:
+                t_res = gl.nondet.web.render(orig_telem_url, mode="text")
+                t_text = str(t_res)
+                computed_t_hash = hashlib.sha256(t_text.encode("utf-8")).hexdigest().lower()
+                if computed_t_hash != orig_telem_hash:
+                    return {
+                        "is_sla_breached": False,
+                        "breach_code": "INSUFFICIENT_DATA",
+                        "reason": f"APPELLATE DISMISSED: Telemetry hash mismatch! Expected {orig_telem_hash}, computed {computed_t_hash}"
+                    }
+            except Exception as e:
+                return {
+                    "is_sla_breached": False,
+                    "breach_code": "INSUFFICIENT_DATA",
+                    "reason": f"APPELLATE DISMISSED: Failed to acquire subscriber telemetry logs: {str(e)}"
+                }
+
+            # 3. Acquire & Verify Provider Pre-committed Counter-Evidence Digest
+            try:
+                c_res = gl.nondet.web.render(counter_url, mode="text")
+                c_text = str(c_res)
+                computed_c_hash = hashlib.sha256(c_text.encode("utf-8")).hexdigest().lower()
+                if computed_c_hash != counter_hash:
+                    return {
+                        "is_sla_breached": False,
+                        "breach_code": "INSUFFICIENT_DATA",
+                        "reason": f"APPELLATE DISMISSED: Counter-evidence hash mismatch! Expected {counter_hash}, computed {computed_c_hash}"
+                    }
+            except Exception as e:
+                return {
+                    "is_sla_breached": False,
+                    "breach_code": "INSUFFICIENT_DATA",
+                    "reason": f"APPELLATE DISMISSED: Failed to acquire counter-evidence: {str(e)}"
                 }
 
             # Strictly bound objective prompt: unverified free-form rationale is omitted
@@ -526,7 +564,7 @@ DECISION MANDATE:
    - "MULTI_METRIC_BREACH": Multi-metric breach upheld.
    - "INSUFFICIENT_DATA": Counter-evidence was invalid or inconclusive.
 4. If is_sla_breached is true, breach_code must be LATENCY_BREACH, ERROR_RATE_BREACH, HEAD_DRIFT_BREACH, or MULTI_METRIC_BREACH.
-5. If is_sla_breached is false, breach_code must be NONE.
+5. If is_sla_breached is false, breach_code must be NONE or INSUFFICIENT_DATA.
 
 Return STRICT JSON only:
 {{"is_sla_breached": true, "breach_code": "LATENCY_BREACH", "reason": "Counter-evidence failed to disprove P99 latency degradation"}}
@@ -538,8 +576,8 @@ OR
                 return self._parse_llm_json(res)
             except Exception as e:
                 return {
-                    "is_sla_breached": True,
-                    "breach_code": "MULTI_METRIC_BREACH",
+                    "is_sla_breached": False,
+                    "breach_code": "INSUFFICIENT_DATA",
                     "reason": f"Appellate LLM error: {str(e)}"
                 }
 
@@ -562,8 +600,8 @@ OR
         res = gl.vm.run_nondet(appeal_leader_fn, appeal_validator_fn)
         final_verdict = self._parse_llm_json(res)
 
-        is_breached = final_verdict.get("is_sla_breached", True)
-        breach_code = final_verdict.get("breach_code", "MULTI_METRIC_BREACH")
+        is_breached = final_verdict.get("is_sla_breached", False)
+        breach_code = final_verdict.get("breach_code", "INSUFFICIENT_DATA")
         rationale = str(final_verdict.get("reason", "Appellate review finalized.")).strip()
 
         policy.adjudication_rationale = f"[APPELLATE DECREE:{breach_code}] {rationale}"
@@ -577,7 +615,7 @@ OR
             self.underwritten_pool_balance -= bond_val
             self._allocate_credit(policy.subscriber_address, bond_val)
         else:
-            # Provider exonerated: Policy returns to active state
+            # Provider exonerated or breach unproven: Policy returns to active state
             policy.status = "ACTIVE"
             policy.adjudication_verdict = f"PERFORMANCE_ACCEPTABLE:{breach_code}"
 
@@ -663,6 +701,8 @@ OR
             "benchmark_manifest_hash": p.benchmark_manifest_hash,
             "incident_telemetry_url": p.incident_telemetry_url,
             "incident_telemetry_hash": p.incident_telemetry_hash,
+            "counter_telemetry_url": p.counter_telemetry_url,
+            "counter_telemetry_hash": p.counter_telemetry_hash,
             "max_p99_latency_ms": str(p.max_p99_latency_ms),
             "max_error_rate_permille": str(p.max_error_rate_permille),
             "max_head_drift_blocks": str(p.max_head_drift_blocks),

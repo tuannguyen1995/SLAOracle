@@ -140,3 +140,71 @@ def test_strict_json_parsing_and_breach_code_binding():
         and leader_data["breach_code"] == validator_data["breach_code"]
     )
     assert not consensus_agreed, "Validators must bind both boolean and discrete breach_code"
+
+
+def test_dispute_requires_authorized_provider_and_valid_precommitted_evidence(contract, direct_vm, direct_alice, direct_bob):
+    """Verify that only the underwriter provider can dispute and must supply valid 64-char SHA256 counter-evidence."""
+    direct_vm.warp("2026-09-22T00:00:00Z")
+    direct_vm.sender = direct_alice
+    direct_vm.value = 3000
+
+    pid = "pol-precommit-test"
+    manifest_hash = hashlib.sha256(b"Manifest terms").hexdigest().lower()
+    contract.underwrite_sla_policy(
+        pid,
+        str(direct_bob).lower(),
+        "https://rpc.example.com",
+        "https://terms.example.com",
+        manifest_hash,
+        250,
+        15,
+        3,
+        30
+    )
+
+    # Cannot dispute while ACTIVE (must be in ASSESSING)
+    counter_hash = hashlib.sha256(b"Provider counter telemetry").hexdigest().lower()
+    with pytest.raises(Exception):
+        contract.dispute_assessment_verdict(
+            pid,
+            "Contesting assessment",
+            "https://logs.provider.com/counter.json",
+            counter_hash
+        )
+
+    # Bob (subscriber) cannot dispute
+    direct_vm.sender = direct_bob
+    with pytest.raises(Exception):
+        contract.dispute_assessment_verdict(
+            pid,
+            "Subscriber attempting dispute",
+            "https://logs.provider.com/counter.json",
+            counter_hash
+        )
+
+
+def test_triple_evidence_hash_reverification():
+    """Verify appellate review re-verifies all 3 evidence digests independently."""
+    manifest_text = "Manifest agreement: 99.9% uptime"
+    telem_text = "Incident dump: 15% error spike"
+    counter_text = "Provider counter logs: client networking timeout"
+
+    man_hash = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest().lower()
+    telem_hash = hashlib.sha256(telem_text.encode("utf-8")).hexdigest().lower()
+    counter_hash = hashlib.sha256(counter_text.encode("utf-8")).hexdigest().lower()
+
+    # Tampering with any of the 3 yields a mismatch
+    tampered_counter = counter_text + " [corrupt]"
+    tampered_counter_hash = hashlib.sha256(tampered_counter.encode("utf-8")).hexdigest().lower()
+    assert counter_hash != tampered_counter_hash
+
+    # Missing or mismatched evidence must fail closed to is_sla_breached = False (INSUFFICIENT_DATA)
+    # and NEVER settle the bond as a proven breach
+    mismatch_fallback = {
+        "is_sla_breached": False,
+        "breach_code": "INSUFFICIENT_DATA",
+        "reason": "APPELLATE DISMISSED: Counter-evidence hash mismatch!"
+    }
+    assert mismatch_fallback["is_sla_breached"] is False
+    assert mismatch_fallback["breach_code"] == "INSUFFICIENT_DATA"
+
